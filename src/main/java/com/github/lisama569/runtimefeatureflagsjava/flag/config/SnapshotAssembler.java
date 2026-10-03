@@ -74,12 +74,21 @@ public class SnapshotAssembler {
         boolean killSwitch = parseKillSwitch(merged);
         var flags = parser.parse(merged);
 
+        // 字段出处：只保留系统认识的键（kill.switch 与 feature.*），随快照不可变发布
+        Map<String, String> origins = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : keyOrigins.entrySet()) {
+            String k = e.getKey();
+            if (KILL_SWITCH_KEY.equals(k) || k.startsWith("feature.")) {
+                origins.put(k, e.getValue());
+            }
+        }
+
         // 快照标识：版本 + 内容指纹，保证同一内容可复现、不同内容可区分
         String fingerprint = fingerprint(version, killSwitch, merged);
         String snapshotId = "v" + version + "-" + fingerprint;
 
         return new ConfigSnapshot(snapshotId, version, System.currentTimeMillis(),
-                killSwitch, Map.copyOf(flags));
+                killSwitch, Map.copyOf(flags), Map.copyOf(origins));
     }
 
     private boolean parseKillSwitch(Map<String, String> merged) {
