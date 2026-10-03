@@ -6,6 +6,7 @@ package com.github.lisama569.runtimefeatureflagsjava.flag.model;
 public enum EvaluationReason {
     NO_CONFIG_LOADED,
     KILL_SWITCH_ACTIVE,
+    FLAG_TEMPORARILY_DISABLED,
     FLAG_NOT_FOUND,
     MASTER_SWITCH_OFF,
     ALLOWLIST_MATCH,

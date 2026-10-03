@@ -26,8 +26,14 @@ import java.util.stream.Collectors;
 public class FlagConfigParser {
 
     private static final String PREFIX = "feature.";
+    /** 字段取显式安全缺省（未在任何来源中出现）时的出处标记。 */
+    private static final String DEFAULT_ORIGIN = "<default>";
 
-    public Map<String, FlagRule> parse(Map<String, String> raw) {
+    /**
+     * @param raw        合并后的原始键值对
+     * @param keyOrigins 每个原始键的出处来源名（由组装层在合并时记录）
+     */
+    public Map<String, FlagRule> parse(Map<String, String> raw, Map<String, String> keyOrigins) {
         // 按 flagKey -> fieldPath(去掉 feature.<key>. 前缀) -> value 归集
         Map<String, Map<String, String>> grouped = new TreeMap<>();
         for (Map.Entry<String, String> e : new TreeMap<>(raw).entrySet()) {
@@ -56,12 +62,13 @@ public class FlagConfigParser {
 
         Map<String, FlagRule> rules = new TreeMap<>();
         for (Map.Entry<String, Map<String, String>> g : grouped.entrySet()) {
-            rules.put(g.getKey(), parseOne(g.getKey(), g.getValue()));
+            rules.put(g.getKey(), parseOne(g.getKey(), g.getValue(), keyOrigins));
         }
         return Map.copyOf(rules);
     }
 
-    private FlagRule parseOne(String flagKey, Map<String, String> fields) {
+    private FlagRule parseOne(String flagKey, Map<String, String> fields,
+                              Map<String, String> keyOrigins) {
         // flagKey 形如 feature.<name>；错误信息里统一使用完整键
         // enabled 必填
         if (!fields.containsKey("enabled")) {
@@ -118,9 +125,30 @@ public class FlagConfigParser {
             }
         }
 
+        // 记录每个生效字段的出处来源，取缺省值的字段标记为 <default>
+        Map<String, String> origins = new TreeMap<>();
+        origins.put("enabled", originOf(keyOrigins, flagKey, "enabled"));
+        origins.put("percentage", fields.containsKey("percentage")
+                ? originOf(keyOrigins, flagKey, "percentage") : DEFAULT_ORIGIN);
+        origins.put("allowlist", fields.containsKey("allowlist")
+                ? originOf(keyOrigins, flagKey, "allowlist") : DEFAULT_ORIGIN);
+        origins.put("salt", fields.containsKey("salt")
+                ? originOf(keyOrigins, flagKey, "salt") : DEFAULT_ORIGIN);
+        for (String field : fields.keySet()) {
+            if (field.startsWith("target.")) {
+                origins.put(field, originOf(keyOrigins, flagKey, field));
+            }
+        }
+
         return new FlagRule(flagKey, enabled, percentage,
                 Set.copyOf(allowList),
-                Map.copyOf(targeting), salt);
+                Map.copyOf(targeting), salt,
+                Map.copyOf(origins));
+    }
+
+    private static String originOf(Map<String, String> keyOrigins,
+                                   String flagKey, String field) {
+        return keyOrigins.getOrDefault(flagKey + "." + field, DEFAULT_ORIGIN);
     }
 
     private boolean parseBoolean(String flagKey, String field, String raw) {

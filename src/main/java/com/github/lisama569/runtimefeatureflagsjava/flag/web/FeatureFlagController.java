@@ -1,5 +1,7 @@
 package com.github.lisama569.runtimefeatureflagsjava.flag.web;
 
+import com.github.lisama569.runtimefeatureflagsjava.flag.disable.DisableOutcome;
+import com.github.lisama569.runtimefeatureflagsjava.flag.disable.DisableView;
 import com.github.lisama569.runtimefeatureflagsjava.flag.model.EvaluationResult;
 import com.github.lisama569.runtimefeatureflagsjava.flag.model.RequestContext;
 import com.github.lisama569.runtimefeatureflagsjava.flag.service.FeatureFlagManager;
@@ -10,6 +12,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -20,6 +24,9 @@ import java.util.TreeMap;
  *   <li>POST /api/admin/refresh       热刷新（失败保旧）</li>
  *   <li>POST /api/admin/kill          紧急关闭（总闸）</li>
  *   <li>POST /api/admin/rollback      回滚到上一份快照</li>
+ *   <li>POST /api/admin/disable?flag=a,b&amp;reason=..&amp;operator=..&amp;ttlMillis=.. 临时停用（可批量）</li>
+ *   <li>POST /api/admin/resume?flag=.. 显式恢复</li>
+ *   <li>GET  /api/admin/disables      查询当前生效中的停用</li>
  * </ul>
  */
 @RestController
@@ -57,5 +64,25 @@ public class FeatureFlagController {
     @PostMapping("/api/admin/rollback")
     public RefreshOutcome rollback() {
         return manager.rollback();
+    }
+
+    @PostMapping("/api/admin/disable")
+    public DisableOutcome disable(@RequestParam String flag,
+                                  @RequestParam String reason,
+                                  @RequestParam String operator,
+                                  @RequestParam(required = false) Long ttlMillis) {
+        List<String> flags = Arrays.stream(flag.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+        return manager.disableAll(flags, reason, operator, ttlMillis);
+    }
+
+    @PostMapping("/api/admin/resume")
+    public DisableOutcome resume(@RequestParam String flag) {
+        return manager.resume(flag);
+    }
+
+    @GetMapping("/api/admin/disables")
+    public List<DisableView> disables() {
+        return manager.activeDisables();
     }
 }

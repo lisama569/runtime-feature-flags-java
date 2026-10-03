@@ -1,5 +1,7 @@
 package com.github.lisama569.runtimefeatureflagsjava.flag.eval;
 
+import com.github.lisama569.runtimefeatureflagsjava.flag.disable.DisableSet;
+import com.github.lisama569.runtimefeatureflagsjava.flag.disable.DisableView;
 import com.github.lisama569.runtimefeatureflagsjava.flag.model.ConfigSnapshot;
 import com.github.lisama569.runtimefeatureflagsjava.flag.model.EvaluationReason;
 import com.github.lisama569.runtimefeatureflagsjava.flag.model.EvaluationResult;
@@ -9,15 +11,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Map;
 
 /**
- * 基于单一不可变快照完成开关判定（确定性、可复现、可解释）。
+ * 基于单一不可变快照 + 一致停用集合完成开关判定（确定性、可复现、可解释）。
  * <p>
  * 判定顺序（短路）：
  * <ol>
  *   <li>无已加载快照 → fail-CLOSED（拒绝开启），原因 NO_CONFIG_LOADED</li>
- *   <li>全局总闸 kill.switch=true → 一律 false，原因 KILL_SWITCH_ACTIVE</li>
+ *   <li>全局总闸 kill.switch=true → 一律 false，原因 KILL_SWITCH_ACTIVE；
+ *       若该开关同时命中局部停用，结果中 disableId 一并带出（两层归因可区分，
+ *       全局层优先）</li>
+ *   <li>命中生效中的局部停用 → false，原因 FLAG_TEMPORARILY_DISABLED，
+ *       disableId 记录命中的（合并）停用记录</li>
  *   <li>开关不存在 → fail-CLOSED，原因 FLAG_NOT_FOUND</li>
  *   <li>开关总开关 enabled=false → 一律 false，原因 MASTER_SWITCH_OFF</li>
  *   <li>命中白名单 → true，原因 ALLOWLIST_MATCH（白名单不受放量比例影响）</li>
@@ -32,20 +39,48 @@ public class FlagEvaluator {
 
     private static final Logger log = LoggerFactory.getLogger(FlagEvaluator.class);
 
+    /** 兼容入口：无停用集合（等价于无任何停用生效）。 */
     public EvaluationResult evaluate(String flagKey, RequestContext context, ConfigSnapshot snapshot) {
+        return evaluate(flagKey, context, snapshot, DisableSet.empty(), System.currentTimeMillis());
+    }
+
+    public EvaluationResult evaluate(String flagKey, RequestContext context,
+                                     ConfigSnapshot snapshot,
+                                     DisableSet disables, long nowMillis) {
         String visitorId = context == null ? null : context.visitorId();
+        DisableSet safeDisables = disables == null ? DisableSet.empty() : disables;
+        DisableView disable = safeDisables.effectiveFor(flagKey, nowMillis);
+        String disableId = disable == null ? null : disable.mergedId();
+
         if (snapshot == null) {
             // 兜底语义：从未成功加载过任何配置时，fail-CLOSED
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.NO_CONFIG_LOADED,
-                    "尚未加载任何配置快照，按 fail-CLOSED 拒绝开启", null));
+                    "尚未加载任何配置快照，按 fail-CLOSED 拒绝开启", null, disableId), null);
         }
 
         if (snapshot.killSwitch()) {
+            // 全局层优先；若局部停用同时命中，归因此处明确标注两层
+            String detail = "全局总闸 kill.switch 已开启，所有开关强制关闭（全局层）";
+            if (disable != null) {
+                detail += "；该开关同时命中局部停用 " + disableId
+                        + "（局部层），当前由全局层关闭";
+            }
             return finish(new EvaluationResult(flagKey, visitorId, false,
-                    EvaluationReason.KILL_SWITCH_ACTIVE,
-                    "全局总闸 kill.switch 已开启，所有开关强制关闭",
-                    snapshot.snapshotId()));
+                    EvaluationReason.KILL_SWITCH_ACTIVE, detail,
+                    snapshot.snapshotId(), disableId), null);
+        }
+
+        if (disable != null) {
+            // 局部停用层：显式恢复或到期之前，任何配置刷新都不得解除
+            String detail = "开关被临时停用（局部层）: disable=" + disableId
+                    + ", reason=" + disable.reason()
+                    + ", operator=" + disable.operator()
+                    + ", baseSnapshot=" + disable.baseSnapshotId()
+                    + ", expiresAt=" + expiryText(disable);
+            return finish(new EvaluationResult(flagKey, visitorId, false,
+                    EvaluationReason.FLAG_TEMPORARILY_DISABLED, detail,
+                    snapshot.snapshotId(), disableId), null);
         }
 
         FlagRule rule = snapshot.flags().get(flagKey);
@@ -54,21 +89,21 @@ public class FlagEvaluator {
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.FLAG_NOT_FOUND,
                     "快照中不存在该开关定义，按 fail-CLOSED 拒绝开启",
-                    snapshot.snapshotId()));
+                    snapshot.snapshotId()), null);
         }
 
         if (!rule.enabled()) {
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.MASTER_SWITCH_OFF,
                     "开关总开关 enabled=false",
-                    snapshot.snapshotId()));
+                    snapshot.snapshotId()), rule);
         }
 
         if (visitorId != null && rule.allowList().contains(visitorId)) {
             return finish(new EvaluationResult(flagKey, visitorId, true,
                     EvaluationReason.ALLOWLIST_MATCH,
                     "访问者命中白名单，直接放量",
-                    snapshot.snapshotId()));
+                    snapshot.snapshotId()), rule);
         }
 
         if (!rule.targeting().isEmpty()) {
@@ -81,7 +116,7 @@ public class FlagEvaluator {
                             EvaluationReason.TARGETING_NOT_MATCHED,
                             "定向条件未命中: " + t.getKey() + " 期望=[" + t.getValue()
                                     + "] 实际=[" + actual + "]",
-                            snapshot.snapshotId()));
+                            snapshot.snapshotId()), rule);
                 }
             }
         }
@@ -93,7 +128,13 @@ public class FlagEvaluator {
                 + " => " + (hit ? "命中(bucket<percentage)" : "未命中(bucket>=percentage)");
         return finish(new EvaluationResult(flagKey, visitorId, hit,
                 EvaluationReason.PERCENTAGE_BUCKETED,
-                detail, snapshot.snapshotId()));
+                detail, snapshot.snapshotId()), rule);
+    }
+
+    private static String expiryText(DisableView disable) {
+        return disable.expiresAtMillis() == null
+                ? "永久(需显式恢复)"
+                : Instant.ofEpochMilli(disable.expiresAtMillis()).toString();
     }
 
     /**
@@ -119,10 +160,14 @@ public class FlagEvaluator {
         }
     }
 
-    private EvaluationResult finish(EvaluationResult r) {
-        log.info("[FLAG-EVAL] snapshot={} flag={} visitor={} decision={} reason={} | {}",
+    private EvaluationResult finish(EvaluationResult r, FlagRule rule) {
+        // 日志对账：配置快照标识 + 命中的停用记录 + 各字段出处来源
+        log.info("[FLAG-EVAL] snapshot={} flag={} visitor={} decision={} reason={} disable={} origins={} | {}",
                 r.snapshotId(), r.flagKey(), r.visitorId(),
-                r.enabled() ? "ON" : "OFF", r.reason(), r.detail());
+                r.enabled() ? "ON" : "OFF", r.reason(),
+                r.disableId() == null ? "-" : r.disableId(),
+                rule == null ? "-" : rule.fieldOrigins(),
+                r.detail());
         return r;
     }
 }

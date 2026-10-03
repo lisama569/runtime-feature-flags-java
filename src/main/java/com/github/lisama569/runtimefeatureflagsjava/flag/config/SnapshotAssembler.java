@@ -72,7 +72,7 @@ public class SnapshotAssembler {
         }
 
         boolean killSwitch = parseKillSwitch(merged);
-        var flags = parser.parse(merged);
+        var flags = parser.parse(merged, keyOrigins);
 
         // 快照标识：版本 + 内容指纹，保证同一内容可复现、不同内容可区分
         String fingerprint = fingerprint(version, killSwitch, merged);
