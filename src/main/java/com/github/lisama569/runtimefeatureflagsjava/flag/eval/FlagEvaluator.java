@@ -59,6 +59,9 @@ public class FlagEvaluator {
                     "尚未加载任何配置快照，按 fail-CLOSED 拒绝开启", null, disableId), null);
         }
 
+        // 提前取出规则：即使被总闸/局部停用短路，日志也要能对账各字段出处来源
+        FlagRule rule = snapshot.flags().get(flagKey);
+
         if (snapshot.killSwitch()) {
             // 全局层优先；若局部停用同时命中，归因此处明确标注两层
             String detail = "全局总闸 kill.switch 已开启，所有开关强制关闭（全局层）";
@@ -68,7 +71,7 @@ public class FlagEvaluator {
             }
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.KILL_SWITCH_ACTIVE, detail,
-                    snapshot.snapshotId(), disableId), null);
+                    snapshot.snapshotId(), disableId), rule);
         }
 
         if (disable != null) {
@@ -80,10 +83,9 @@ public class FlagEvaluator {
                     + ", expiresAt=" + expiryText(disable);
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.FLAG_TEMPORARILY_DISABLED, detail,
-                    snapshot.snapshotId(), disableId), null);
+                    snapshot.snapshotId(), disableId), rule);
         }
 
-        FlagRule rule = snapshot.flags().get(flagKey);
         if (rule == null) {
             // 兜底语义：开关未定义，fail-CLOSED（不会"默认开启"）
             return finish(new EvaluationResult(flagKey, visitorId, false,
@@ -160,13 +162,27 @@ public class FlagEvaluator {
         }
     }
 
+    /**
+     * 统一出口：每条判定日志都稳定携带对账信息——
+     * 配置快照标识、命中的停用记录、开关各字段出处来源。
+     * 显式标记（区别于"来源缺失/未知"）：
+     * <ul>
+     *   <li>无已加载配置：{@code snapshot=<none>} 且 {@code origins=<no-config>}</li>
+     *   <li>快照中未定义该开关：{@code origins=<flag-not-defined>}</li>
+     *   <li>取缺省值的字段：在 origins 中标记 {@code <default>}</li>
+     * </ul>
+     */
     private EvaluationResult finish(EvaluationResult r, FlagRule rule) {
-        // 日志对账：配置快照标识 + 命中的停用记录 + 各字段出处来源
+        boolean noConfig = r.snapshotId() == null;
+        String snapshotText = noConfig ? "<none>" : r.snapshotId();
+        String originsText = noConfig
+                ? "<no-config>"
+                : (rule == null ? "<flag-not-defined>" : rule.fieldOrigins().toString());
         log.info("[FLAG-EVAL] snapshot={} flag={} visitor={} decision={} reason={} disable={} origins={} | {}",
-                r.snapshotId(), r.flagKey(), r.visitorId(),
+                snapshotText, r.flagKey(), r.visitorId(),
                 r.enabled() ? "ON" : "OFF", r.reason(),
                 r.disableId() == null ? "-" : r.disableId(),
-                rule == null ? "-" : rule.fieldOrigins(),
+                originsText,
                 r.detail());
         return r;
     }

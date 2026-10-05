@@ -88,14 +88,42 @@ public class FeatureFlagManager {
             return evaluator.evaluate(flagKey, context, snapshot,
                     current.disables(), clock.millis());
         } catch (RuntimeException ex) {
-            // 兜底语义：判定本身出错也 fail-CLOSED，原因码明确为 EVALUATION_ERROR
+            // 兜底语义：判定本身出错也 fail-CLOSED，原因码明确为 EVALUATION_ERROR；
+            // 日志同样携带可对账信息（快照/停用/字段出处，尽力而为，绝不再抛）
             String sid = snapshot == null ? null : snapshot.snapshotId();
-            log.warn("[FLAG-EVAL] snapshot={} flag={} 判定异常，fail-CLOSED: {}",
-                    sid, flagKey, ex.getMessage(), ex);
+            log.warn("[FLAG-EVAL] snapshot={} flag={} visitor={} decision=OFF reason={} disable={} origins={} | 判定异常，fail-CLOSED: {}",
+                    sid == null ? "<none>" : sid, flagKey,
+                    context == null ? null : context.visitorId(),
+                    EvaluationReason.EVALUATION_ERROR,
+                    safeDisableHit(current, flagKey), safeOrigins(snapshot, flagKey),
+                    ex.getMessage(), ex);
             return new EvaluationResult(flagKey,
                     context == null ? null : context.visitorId(),
                     false, EvaluationReason.EVALUATION_ERROR,
                     "判定过程异常，按 fail-CLOSED 拒绝开启: " + ex.getMessage(), sid);
+        }
+    }
+
+    /** 兜底日志用：尽力给出命中的停用记录标识，任何异常都退化为 "-"，不再抛出。 */
+    private String safeDisableHit(ControlState state, String flagKey) {
+        try {
+            DisableView hit = state.disables().effectiveFor(flagKey, clock.millis());
+            return hit == null ? "-" : hit.mergedId();
+        } catch (RuntimeException ignored) {
+            return "-";
+        }
+    }
+
+    /** 兜底日志用：尽力给出字段出处来源，任何异常都退化为显式标记，不再抛出。 */
+    private String safeOrigins(ConfigSnapshot snapshot, String flagKey) {
+        try {
+            if (snapshot == null) {
+                return "<no-config>";
+            }
+            FlagRule rule = snapshot.flags().get(flagKey);
+            return rule == null ? "<flag-not-defined>" : rule.fieldOrigins().toString();
+        } catch (RuntimeException ignored) {
+            return "<unknown>";
         }
     }
 
