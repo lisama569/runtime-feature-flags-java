@@ -34,6 +34,20 @@ import java.util.Map;
  * <b>粘性</b>：bucket 仅由 salt + visitorId 决定，与 percentage 无关；
  * 放量比例增减只移动阈值，不重排桶位——已命中且 bucket 小于新阈值的访问者
  * 不会反复抖动。
+ * <p>
+ * <b>对账日志</b>：每一次判定（含所有短路分支）都输出一条完整一致的
+ * {@code [FLAG-EVAL]} 日志，稳定携带三类对账信息：
+ * <ul>
+ *   <li>{@code snapshot=} 本次判定依据的配置快照标识；从未加载到配置时显式输出
+ *       {@code <none>}（"没有配置"可明确区分于"来源未知"）；</li>
+ *   <li>{@code disable=} 命中的停用记录标识（多条命中为合并标识），未命中为 {@code -}；</li>
+ *   <li>{@code origins=} 该开关各生效字段分别来自哪个配置来源（取缺省值的字段标记
+ *       {@code <default>}）；开关未在快照中定义时为 {@code <flag-not-defined>}，
+ *       无配置快照时为 {@code <no-config>}。被全局总闸/局部停用短路时同样照常输出，
+ *       不会因为是短路分支就丢失字段来源。</li>
+ * </ul>
+ * 日志内容全部取自本次判定使用的同一份不可变 (快照, 停用集合)，
+ * 并发下每条日志都完整一致、与判定结论对得上。
  */
 public class FlagEvaluator {
 
@@ -51,12 +65,15 @@ public class FlagEvaluator {
         DisableSet safeDisables = disables == null ? DisableSet.empty() : disables;
         DisableView disable = safeDisables.effectiveFor(flagKey, nowMillis);
         String disableId = disable == null ? null : disable.mergedId();
+        // 对账用规则视图：只要存在快照就取出该开关的字段出处，即使本次判定被
+        // 总闸/局部停用短路，日志里也能看到各字段来源；不参与任何判定结论。
+        FlagRule auditRule = snapshot == null ? null : snapshot.flags().get(flagKey);
 
         if (snapshot == null) {
             // 兜底语义：从未成功加载过任何配置时，fail-CLOSED
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.NO_CONFIG_LOADED,
-                    "尚未加载任何配置快照，按 fail-CLOSED 拒绝开启", null, disableId), null);
+                    "尚未加载任何配置快照，按 fail-CLOSED 拒绝开启", null, disableId), auditRule);
         }
 
         if (snapshot.killSwitch()) {
@@ -68,7 +85,7 @@ public class FlagEvaluator {
             }
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.KILL_SWITCH_ACTIVE, detail,
-                    snapshot.snapshotId(), disableId), null);
+                    snapshot.snapshotId(), disableId), auditRule);
         }
 
         if (disable != null) {
@@ -80,7 +97,7 @@ public class FlagEvaluator {
                     + ", expiresAt=" + expiryText(disable);
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.FLAG_TEMPORARILY_DISABLED, detail,
-                    snapshot.snapshotId(), disableId), null);
+                    snapshot.snapshotId(), disableId), auditRule);
         }
 
         FlagRule rule = snapshot.flags().get(flagKey);
@@ -89,7 +106,7 @@ public class FlagEvaluator {
             return finish(new EvaluationResult(flagKey, visitorId, false,
                     EvaluationReason.FLAG_NOT_FOUND,
                     "快照中不存在该开关定义，按 fail-CLOSED 拒绝开启",
-                    snapshot.snapshotId()), null);
+                    snapshot.snapshotId()), auditRule);
         }
 
         if (!rule.enabled()) {
@@ -161,13 +178,30 @@ public class FlagEvaluator {
     }
 
     private EvaluationResult finish(EvaluationResult r, FlagRule rule) {
-        // 日志对账：配置快照标识 + 命中的停用记录 + 各字段出处来源
+        // 日志对账：配置快照标识 + 命中的停用记录 + 各字段出处来源。
+        // 所有分支（含短路）都走到这里，保证每条判定日志的三类对账信息完整一致。
         log.info("[FLAG-EVAL] snapshot={} flag={} visitor={} decision={} reason={} disable={} origins={} | {}",
-                r.snapshotId(), r.flagKey(), r.visitorId(),
+                r.snapshotId() == null ? "<none>" : r.snapshotId(),
+                r.flagKey(), r.visitorId(),
                 r.enabled() ? "ON" : "OFF", r.reason(),
                 r.disableId() == null ? "-" : r.disableId(),
-                rule == null ? "-" : rule.fieldOrigins(),
+                originsText(r, rule),
                 r.detail());
         return r;
+    }
+
+    /**
+     * 字段出处来源的日志文本：
+     * <ul>
+     *   <li>开关在快照中有定义 → 各字段来源表（取缺省值的字段为 {@code <default>}）；</li>
+     *   <li>快照存在但开关未定义 → {@code <flag-not-defined>}；</li>
+     *   <li>没有任何配置快照 → {@code <no-config>}（明确是"没有配置"，而非来源缺失/未知）。</li>
+     * </ul>
+     */
+    private static String originsText(EvaluationResult r, FlagRule rule) {
+        if (rule != null) {
+            return rule.fieldOrigins().toString();
+        }
+        return r.snapshotId() == null ? "<no-config>" : "<flag-not-defined>";
     }
 }

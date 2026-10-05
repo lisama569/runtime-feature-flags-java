@@ -115,12 +115,27 @@ flag/
 - `activeDisables()` / `GET /api/admin/disables`：返回当前生效停用的合并视图——
   开关名、指令 id 列表、原因、操作人、创建时间、到期时间（null=永久）、
   **生效时基于的配置快照标识**。
-- 每次判定日志包含：配置快照标识、命中的停用记录（`disable=`）、
-  开关各字段分别来自哪个配置来源（`origins=`，取缺省值的字段标记 `<default>`）：
+- **每一次判定**（含所有短路分支：总闸、局部停用、开关未定义、无配置兜底）
+  都会输出一条完整一致的 `[FLAG-EVAL]` 日志，稳定携带三类对账信息：
+
+  | 字段 | 含义 |
+  |---|---|
+  | `snapshot=` | 本次判定依据的配置快照标识；从未加载到配置时显式为 `<none>`（明确是"没有配置"，而非来源缺失/未知） |
+  | `disable=` | 命中的停用记录标识（多条命中为合并标识，如 `d-1+d-2`）；未命中为 `-` |
+  | `origins=` | 该开关各生效字段分别来自哪个配置来源；取缺省值的字段标记 `<default>`；开关未在快照中定义为 `<flag-not-defined>`；无配置快照为 `<no-config>` |
+
+  被全局总闸或局部停用短路时，字段来源**照常输出**（取自判定使用的同一份不可变
+  快照），不会因为是短路分支就丢失；总闸与局部停用叠加时，日志同时给出字段来源、
+  命中的停用记录，并在细节中标注"全局层/局部层"两层归因。刷新失败、来源缺失、
+  紧急关闭、回滚之后的判定同样带完整对账信息（对账到实际生效的那份快照）。
+  日志内容全部来自本次判定的同一份 (快照, 停用集合)，并发下每条日志完整、
+  与判定结论逐项对得上。
 
 ```
-[FLAG-EVAL] snapshot=v2-667a5cc3ef07 flag=feature.hotfix visitor=user-1 decision=OFF reason=FLAG_TEMPORARILY_DISABLED disable=d-1 origins=- | 开关被临时停用（局部层）: disable=d-1, reason=线上资损排查, operator=sre-lisa, baseSnapshot=v1-b6cae87b1d89, expiresAt=永久(需显式恢复)
+[FLAG-EVAL] snapshot=v2-667a5cc3ef07 flag=feature.hotfix visitor=user-1 decision=OFF reason=FLAG_TEMPORARILY_DISABLED disable=d-1 origins={enabled=remote-center, percentage=remote-center, allowlist=<default>, salt=<default>} | 开关被临时停用（局部层）: disable=d-1, reason=线上资损排查, operator=sre-lisa, baseSnapshot=v1-b6cae87b1d89, expiresAt=永久(需显式恢复)
+[FLAG-EVAL] snapshot=v3-KILL flag=feature.hotfix visitor=user-1 decision=OFF reason=KILL_SWITCH_ACTIVE disable=d-1 origins={enabled=remote-center, ...} | 全局总闸 kill.switch 已开启，所有开关强制关闭（全局层）；该开关同时命中局部停用 d-1（局部层），当前由全局层关闭
 [FLAG-EVAL] snapshot=v1-876c435835ab flag=feature.demo visitor=user-1 decision=ON reason=PERCENTAGE_BUCKETED disable=- origins={salt=<default>, allowlist=<default>, enabled=local-defaults, percentage=remote-center} | 稳定分桶: ...
+[FLAG-EVAL] snapshot=<none> flag=feature.demo visitor=user-1 decision=OFF reason=NO_CONFIG_LOADED disable=- origins=<no-config> | 尚未加载任何配置快照，按 fail-CLOSED 拒绝开启
 ```
 
 ## 5. 并发一致性、兜底与回滚语义
@@ -154,11 +169,14 @@ flag/
 ## 7. 本地验证方法
 
 ```bash
-# 全量测试（22 个用例，日志直接打印到控制台，可看到每个场景的快照/停用/判定细节）
+# 全量测试（31 个用例，日志直接打印到控制台，可看到每个场景的快照/停用/判定细节）
 mvn test
 
 # 只跑停用相关用例
 mvn test -Dtest=TemporaryDisableTest,ConcurrentDisableConsistencyTest
+
+# 只跑判定对账日志用例（各短路分支的快照/停用记录/字段来源、刷新失败与回滚后、并发完整性）
+mvn test -Dtest=EvaluationAuditLogTest
 
 # 打包并启动（端口可改）
 mvn package -DskipTests
@@ -176,6 +194,7 @@ java -jar target/runtime-feature-flags-java-1.0-SNAPSHOT.jar --server.port=18091
 | `RefreshFailureAndRollbackTest` | 失败保旧、紧急关闭、回滚恢复、无历史回滚被拒、NO_CONFIG_LOADED/FLAG_NOT_FOUND 等兜底 |
 | `TemporaryDisableTest` | 停用跨好/坏刷新持续有效、到期自动恢复且结论与从未停用一致、总闸+局部停用分层归因、多指令合并视图、容量超限拒绝且现状不变、查询视图字段与非法请求 |
 | `ConcurrentDisableConsistencyTest` | 停用/恢复/刷新/判定并发：命中停用必带 disableId、无 `EVALUATION_ERROR`、生效停用数永不超容量 |
+| `EvaluationAuditLogTest` | 判定对账日志：正常放量/白名单/定向未命中/总闸/局部停用/总闸+局部叠加/开关未定义/无配置各分支都带快照+停用记录+字段来源（缺省值与"没有配置"显式标记）、刷新失败与紧急关闭/回滚后对账到实际生效快照、并发下每条日志完整且与结论一致 |
 
 手动冒烟示例：
 

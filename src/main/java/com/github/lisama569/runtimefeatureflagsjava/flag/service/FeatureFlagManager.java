@@ -89,13 +89,14 @@ public class FeatureFlagManager {
                     current.disables(), clock.millis());
         } catch (RuntimeException ex) {
             // 兜底语义：判定本身出错也 fail-CLOSED，原因码明确为 EVALUATION_ERROR
-            String sid = snapshot == null ? null : snapshot.snapshotId();
+            String sid = snapshot == null ? "<none>" : snapshot.snapshotId();
             log.warn("[FLAG-EVAL] snapshot={} flag={} 判定异常，fail-CLOSED: {}",
                     sid, flagKey, ex.getMessage(), ex);
             return new EvaluationResult(flagKey,
                     context == null ? null : context.visitorId(),
                     false, EvaluationReason.EVALUATION_ERROR,
-                    "判定过程异常，按 fail-CLOSED 拒绝开启: " + ex.getMessage(), sid);
+                    "判定过程异常，按 fail-CLOSED 拒绝开启: " + ex.getMessage(),
+                    snapshot == null ? null : snapshot.snapshotId());
         }
     }
 
